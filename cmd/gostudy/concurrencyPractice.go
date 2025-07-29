@@ -1,6 +1,11 @@
 package main
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"sync"
+)
 
 // #61: Propagating an inappropriate context -----------------------------------------------------------------------------------------
 
@@ -13,7 +18,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
         return
     }
     go func() { // publish the response to kafka by creating a new goroutine
-        err := publish(r.Context(), response)
+        _ = publish(r.Context(), response)
         // Do something with err (context may be canceled prematurely)
     }()
     writeResponse(w, response) // writes the response to the HTTP response writer
@@ -24,7 +29,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 
 // How to avoid the mistake: call publish with an empty context
-func handler(w http.ResponseWriter, r *http.Request) {
+func handlerCorrect(w http.ResponseWriter, r *http.Request) {
     response, err := doSomeTask(r.Context(), r)
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -32,10 +37,23 @@ func handler(w http.ResponseWriter, r *http.Request) {
     }
   
     go func() {
-        err := publish(context.Background(), response) // empty context
+        _ = publish(context.Background(), response) // empty context
         // Do something with err
     }()
     writeResponse(w, response)
+}
+
+// Helper functions for context example
+func doSomeTask(ctx context.Context, r *http.Request) (string, error) {
+    return "response", nil
+}
+
+func publish(ctx context.Context, response string) error {
+    return nil
+}
+
+func writeResponse(w http.ResponseWriter, response string) {
+    fmt.Fprintf(w, response)
 }
 
 
@@ -47,28 +65,40 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 // Code Example: Mistake and how to avoid it
 
-func main() {
-    w := newWatcher()
+func mistake62() {
+    _ = newWatcher()
     // defer w.close() // if we don't close the watcher, the goroutine will run forever
     // Run the application
+    fmt.Println("Watcher created without proper cleanup - goroutine will leak")
+}
+
+func avoid62() {
+    w := newWatcher()
+    defer w.close() // Proper cleanup
+    fmt.Println("Watcher created with proper cleanup")
 }
 
 type watcher struct {
-    // Internal fields...
+    done chan struct{}
 }
 
-func newWatcher() watcher {
-    w := watcher{}
+func newWatcher() *watcher {
+    w := &watcher{done: make(chan struct{})}
     go w.watch() // creates a goroutine that watches external configuration
     return w
 }
 
-func (w watcher) watch() {
+func (w *watcher) watch() {
     // Watching logic, listen for done signal...
+    select {
+    case <-w.done:
+        fmt.Println("Watcher stopped")
+        return
+    }
 }
 
-func (w watcher) close() {
-    // Signal stop and close resources
+func (w *watcher) close() {
+    close(w.done) // Signal stop and close resources
 }
 
 
@@ -77,37 +107,32 @@ func (w watcher) close() {
 
 // Code Example: Mistake
 
-func mistake() {
+func mistake63() {
 	s := []int{1, 2, 3}
 	for _, i := range s {
 		go func() {
-			fmt.Println(i)
+			fmt.Printf("%d\n", i)
 		}()
 	}
 }
 
-// expectation: 1, 2, 3
-// actual: 3, 3, 3 or 2, 3, 3 or 1, 3, 3 idk man
-
-func kindOfCorrect() {
+func avoid63() {
 	s := []int{1, 2, 3}
 	for _, i := range s {
 		val := i
 		go func() {
-			fmt.Println(val)
+			fmt.Printf("%d\n", val)
 		}()
 	}
 }
-// expectation: 1, 2, 3
-// actual: 1, 2, 3
-
-func correct() {
-	s := []int{1, 2, 3}
+	
+func avoid63_2() {
+    s := []int{1, 2, 3}
 	for _, i := range s {
 		go func(val int) { // executes a function that takes an integer as an argument
-			fmt.Println(val)
+			fmt.Printf("%d\n", val)
 		}(i) // calls this function and passes the current value of i
-	}
+	}	
 }
 
 // #64: Expecting Deterministic Behavior Using Select and Channels ---------------------------------------------------------------------
@@ -118,39 +143,48 @@ func correct() {
 
 // Code Example: Mistake
 
-messageCh := make(chan int)
-disconnectCh := make(chan struct{})
+func mistake64() {
+	fmt.Println("=== Mistake 64: Non-deterministic select behavior ===")
+	messageCh := make(chan int)
+	disconnectCh := make(chan struct{})
 
-go func() {
-    for i := 0; i < 10; i++ {
-        messageCh <- i
-    }
-    disconnectCh <- struct{}{}
-}()
+	go func() {
+		for i := 0; i < 10; i++ {
+			messageCh <- i
+		}
+		disconnectCh <- struct{}{}
+	}()
 
-for {
-    select {
-    case v := <-messageCh:
-        fmt.Println(v)
-    case <-disconnectCh:
-        fmt.Println("disconnection, return")
-        return // May return before all messages if select chooses randomly
-    }
+	count := 0
+	for {
+		select {
+		case v := <-messageCh:
+			fmt.Printf("Received: %d\n", v)
+			count++
+		case <-disconnectCh:
+			fmt.Printf("Disconnection, processed %d messages\n", count)
+			return // May return before all messages if select chooses randomly
+		}
+	}
 }
 
-// How to avoid the mistake:
+func avoid64() {
+	fmt.Println("=== Avoid 64: Deterministic channel draining ===")
+	messageCh := make(chan int)
 
-messageCh := make(chan int)
+	go func() {
+		for i := 0; i < 10; i++ {
+			messageCh <- i
+		}
+		close(messageCh) // Use close for deterministic drain
+	}()
 
-go func() {
-    for i := 0; i < 10; i++ {
-        messageCh <- i
-    }
-    close(messageCh) // Use close for deterministic drain
-}()
-
-for v := range messageCh {
-    fmt.Println(v)
+	count := 0
+	for v := range messageCh {
+		fmt.Printf("Received: %d\n", v)
+		count++
+	}
+	fmt.Printf("Processed all %d messages\n", count)
 }
 
 // #65: Not Using Notification Channels -----------------------------------------------------------------------------------------------
@@ -159,25 +193,60 @@ for v := range messageCh {
 // chan struct{} is idiomatic for notifications and uses zero memory allocation for signals.
 
 // Code Example: Mistake
-done := make(chan bool)
-go func() {
-    // Work...
-    done <- true // What does true mean?
-}()
-<-done
+func mistake65() {
+	fmt.Println("=== Mistake 65: Using bool channel for notifications ===")
+	done := make(chan bool)
+	go func() {
+		// Work...
+		fmt.Println("Work completed")
+		done <- true // What does true mean?
+	}()
+	<-done
+	fmt.Println("Received bool signal")
+}
 
 // How to avoid the mistake:
-done := make(chan struct{})
-go func() {
-    // Work...
-    close(done) // Clear signal
-}()
-<-done
+func avoid65() {
+	fmt.Println("=== Avoid 65: Using struct{} channel for notifications ===")
+	done := make(chan struct{})
+	go func() {
+		// Work...
+		fmt.Println("Work completed")
+		close(done) // Clear signal
+	}()
+	<-done
+	fmt.Println("Received struct{} signal")
+}
 
 
 // #66: Not Using Nil Channels ------------------------------------------------------------------------------------------------------
 
 // Code Example: How to avoid the mistake
+
+func avoid66() {
+	fmt.Println("=== Avoid 66: Using nil channels for disabling ===")
+	ch1 := make(chan int)
+	ch2 := make(chan int)
+	
+	// Send some values
+	go func() {
+		ch1 <- 1
+		ch1 <- 2
+		close(ch1)
+	}()
+	
+	go func() {
+		ch2 <- 3
+		ch2 <- 4
+		close(ch2)
+	}()
+	
+	merged := merge(ch1, ch2)
+	
+	for v := range merged {
+		fmt.Printf("Merged value: %d\n", v)
+	}
+}
 
 func merge(ch1, ch2 <-chan int) <-chan int {
     ch := make(chan int, 1)
@@ -214,14 +283,23 @@ func merge(ch1, ch2 <-chan int) <-chan int {
 
 // Code Example: Mistake
 
-ch := make(chan int) // Unbuffered
-ch <- 1 // Blocks forever if no receiver
+func mistake67() {
+	fmt.Println("=== Mistake 67: Unbuffered channel causing deadlock ===")
+	_ = make(chan int) // Unbuffered
+	// This would block forever if no receiver
+	// ch <- 1 // Uncomment to see deadlock
+	fmt.Println("Unbuffered channel created - would block if no receiver")
+}
 
 // How to avoid the mistake:
 
-ch := make(chan int, 1) // Size 1 for non-blocking signal
-ch <- 1 // Doesn't block
-v := <-ch
+func avoid67() {
+	fmt.Println("=== Avoid 67: Buffered channel for non-blocking sends ===")
+	ch := make(chan int, 1) // Size 1 for non-blocking signal
+	ch <- 1 // Doesn't block
+	v := <-ch
+	fmt.Printf("Received value: %d\n", v)
+}
 
 
 // #68: Forgetting About Possible Side Effects with String Formatting ---------------------------------------------------------------------
@@ -241,16 +319,32 @@ func (m *myType) String() string {
     return fmt.Sprintf("%d", m.state)
 }
 
-func main() {
+func mistake68() {
+	fmt.Println("=== Mistake 68: String method with side effects ===")
     mt := &myType{}
     go fmt.Println(mt) // Calls String() concurrently
     go fmt.Println(mt)
+   
 }
 
 // How to avoid:
 
-func (m *myType) String() string {
+type myTypeSafe struct {
+    state int
+    mu    sync.Mutex
+}
+
+func (m *myTypeSafe) String() string {
+    m.mu.Lock()
+    defer m.mu.Unlock()
     return fmt.Sprintf("%d", m.state) // No side effect
+}
+
+func avoid68() {
+	fmt.Println("=== Avoid 68: Thread-safe String method ===")
+    mt := &myTypeSafe{state: 1}
+    go fmt.Println(mt) // Calls String() concurrently
+    go fmt.Println(mt)
 }
 
 // #69: Creating data races with append ----------------------------------------------------------------------------------------------
@@ -259,35 +353,41 @@ func (m *myType) String() string {
 // Even if append returns a new slice, concurrent modifications lead to corruption.
 // Solution: Use mutex protection or channels for safe concurrent updates.
 
-
 // Code Example: Mistake
 
-var s []int
-var mu sync.Mutex
+func mistake69() {
+	fmt.Println("=== Mistake 69: Data race with append ===")
+	var s []int
+	// var mu sync.Mutex // Commented out to show the race
 
-go func() {
-    s = append(s, 1) // Race on s
-}()
-go func() {
-    s = append(s, 2)
-}()
-
+	go func() {
+		s = append(s, 1) // Race on s
+	}()
+	go func() {
+		s = append(s, 2)
+	}()
+	fmt.Printf("Slice length: %d (may be corrupted)\n", len(s))
+}
 
 // How to avoid:
 
-var s []int
-var mu sync.Mutex
+func avoid69() {
+	fmt.Println("=== Avoid 69: Safe append with mutex ===")
+	var s []int
+	var mu sync.Mutex
 
-go func() {
-    mu.Lock()
-    s = append(s, 1)
-    mu.Unlock()
-}()
-go func() {
-    mu.Lock()
-    s = append(s, 2)
-    mu.Unlock()
-}()
+	go func() {
+		mu.Lock()
+		s = append(s, 1)
+		mu.Unlock()
+	}()
+	go func() {
+		mu.Lock()
+		s = append(s, 2)
+		mu.Unlock()
+	}()
+	fmt.Printf("Slice length: %d (safe)\n", len(s))
+}
 
 
 // #70: Using Mutexes Inaccurately with Slices and Maps --------------------------------------------------------------------------------
@@ -299,27 +399,34 @@ go func() {
 
 // Code Example: Mistake
 
-m := make(map[string]int)
-var mu sync.Mutex
+func mistake70() {
+	fmt.Println("=== Mistake 70: Race condition with map access ===")
+	m := make(map[string]int)
+	var mu sync.Mutex
 
-go func() {
-    mu.Lock()
-    m["key"] = 1
-    mu.Unlock()
-}()
-go func() {
-    _ = m["key"] // Race if read without lock
-}()
-
+	go func() {
+		mu.Lock()
+		m["key"] = 1
+		mu.Unlock()
+	}()
+	go func() {
+		_ = m["key"] // Race if read without lock
+	}()
+	fmt.Println("Map access completed (may have race condition)")
+}
 
 // How to avoid:
 
-var sm sync.Map
+func avoid70() {
+	fmt.Println("=== Avoid 70: Using sync.Map for concurrent access ===")
+	var sm sync.Map
 
-go func() {
-    sm.Store("key", 1)
-}()
-go func() {
-    v, _ := sm.Load("key")
-    fmt.Println(v)
-}()
+	go func() {
+		sm.Store("key", 1)
+	}()
+	go func() {
+		v, _ := sm.Load("key")
+		fmt.Printf("Loaded value: %v\n", v)
+	}()
+	fmt.Println("sync.Map access completed safely")
+}
