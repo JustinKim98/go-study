@@ -169,22 +169,33 @@ func mistake64() {
 }
 
 func avoid64() {
-	fmt.Println("=== Avoid 64: Deterministic channel draining ===")
+	fmt.Println("=== Avoid 64: Deterministic channel draining with disconnect signal ===")
 	messageCh := make(chan int)
+	disconnectCh := make(chan struct{})
 
 	go func() {
 		for i := 0; i < 10; i++ {
 			messageCh <- i
 		}
-		close(messageCh) // Use close for deterministic drain
+		disconnectCh <- struct{}{}
 	}()
 
-	count := 0
-	for v := range messageCh {
-		fmt.Printf("Received: %d\n", v)
-		count++
+	for {
+		select {
+		case v := <-messageCh:
+			fmt.Println(v)
+		case <-disconnectCh:
+			for { // Inner for/select
+				select { // Reads the remaining messages
+				case v := <-messageCh:
+					fmt.Println(v)
+				default:
+					fmt.Println("disconnection, return")
+					return
+				}
+			}
+		}
 	}
-	fmt.Printf("Processed all %d messages\n", count)
 }
 
 // #65: Not Using Notification Channels -----------------------------------------------------------------------------------------------
@@ -208,7 +219,7 @@ func mistake65() {
 // How to avoid the mistake:
 func avoid65() {
 	fmt.Println("=== Avoid 65: Using struct{} channel for notifications ===")
-	done := make(chan struct{})
+	done := make(chan struct{}) // only need this basically
 	go func() {
 		// Work...
 		fmt.Println("Work completed")
@@ -308,43 +319,76 @@ func avoid67() {
 // Can cause data races or deadlocks if methods access shared resources.
 // Solution: Ensure methods like String() are thread-safe or avoid formatting in concurrent contexts.
 
-// Code Example: Mistake (Data race)
+// Code Example: Mistake (Deadlock)
 
-type myType struct {
-    state int // Shared
+type Customer struct {
+	mutex sync.RWMutex
+	id    string
+	age   int
 }
 
-func (m *myType) String() string {
-    m.state++ // Side effect, race if formatted concurrently
-    return fmt.Sprintf("%d", m.state)
+func (c *Customer) UpdateAge(age int) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if age < 0 {
+		return fmt.Errorf("age should be positive for customer %v", c)
+	}
+	c.age = age
+	return nil
+}
+
+func (c *Customer) String() string {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return fmt.Sprintf("id %s, age %d", c.id, c.age)
 }
 
 func mistake68() {
-	fmt.Println("=== Mistake 68: String method with side effects ===")
-    mt := &myType{}
-    go fmt.Println(mt) // Calls String() concurrently
-    go fmt.Println(mt)
-   
+	fmt.Println("=== Mistake 68: Deadlock with String method ===")
+	customer := &Customer{id: "123", age: 25}
+	
+	// This will cause a deadlock because UpdateAge calls String() in the error message
+	// while holding a write lock, but String() tries to acquire a read lock
+	err := customer.UpdateAge(-1)
+	if err != nil {
+		fmt.Println("Error:", err)
+	}
 }
 
 // How to avoid:
 
-type myTypeSafe struct {
-    state int
-    mu    sync.Mutex
+type CustomerSafe struct {
+	mutex sync.RWMutex
+	id    string
+	age   int
 }
 
-func (m *myTypeSafe) String() string {
-    m.mu.Lock()
-    defer m.mu.Unlock()
-    return fmt.Sprintf("%d", m.state) // No side effect
+func (c *CustomerSafe) UpdateAge(age int) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if age < 0 {
+		// Avoid calling String() while holding the lock
+		return fmt.Errorf("age should be positive for customer id %s", c.id)
+	}
+	c.age = age
+	return nil
+}
+
+func (c *CustomerSafe) String() string {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return fmt.Sprintf("id %s, age %d", c.id, c.age)
 }
 
 func avoid68() {
-	fmt.Println("=== Avoid 68: Thread-safe String method ===")
-    mt := &myTypeSafe{state: 1}
-    go fmt.Println(mt) // Calls String() concurrently
-    go fmt.Println(mt)
+	fmt.Println("=== Avoid 68: No deadlock with safe String method ===")
+	customer := &CustomerSafe{id: "123", age: 25}
+	
+	// This won't cause a deadlock because we don't call String() while holding the lock
+	err := customer.UpdateAge(-1)
+	if err != nil {
+		fmt.Println("Error:", err)
+	}
 }
 
 // #69: Creating data races with append ----------------------------------------------------------------------------------------------
