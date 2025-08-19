@@ -76,7 +76,7 @@ func (c bankCustomer) misusedAdd(operation float32) {
 
 // / 1. use a pointer of receiver is a large object
 // / 2. use a value to enforce immutability, or receivcer is a map, function or channel
-// / 3. prefer value if type is small array or struct, or baisc types such as int, float... etc
+// / 3. prefer value if type is small array or struct, or basic types such as int, float... etc
 // / Mixing receiver types should be avoided, but there's a counterexample (time.Time)
 func test() {
 	bankCustomer := bankCustomer{
@@ -102,13 +102,13 @@ func test() {
 // Specifying name to result can be helpful for code readability.
 // But, should be used in suitable cases, eg) interfaces, or cases where it's not obvious what the result is.
 // Also, it can be used to shorten the implementation, by default-initializing the result.
-func f(a int) (b int) {
+func f(a int) (b int, c int) {
 	b = a + 1
-	return
+	return b, c
 }
 
 //===============================================
-// Rule 44 Unintended side deffects with named result parameters
+// Rule 44 Unintended side effects with named result parameters
 //===============================================
 
 type loc struct {
@@ -164,6 +164,8 @@ type Customer struct {
 	Name string
 }
 
+// error[*MultiError = nil] (x)
+// error[nil]
 func (c Customer) Validate() error {
 	var m *MultiError
 	if c.Age < 0 {
@@ -178,7 +180,7 @@ func (c Customer) Validate() error {
 	}
 
 	// fix : check for nil before wrapping it with error interface
-	// if m != nil{
+	// if m != nil {
 	// 	return m
 	// }
 	// return nil
@@ -212,6 +214,7 @@ func countEmptyLinesInFile(filename string) (emptyLines int, err error) {
 }
 
 // / this would be much better solution since code is resuable, and we can test it with different sources.
+// 테스트하기 좋은 코드를 고민하면 좋은 코드가 나온다 2025.7.16 @Minho Park
 func countEmptyLinesInFile2(r io.Reader) (emptyLines int, err error) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
@@ -227,20 +230,24 @@ func countEmptyLinesInFile2(r io.Reader) (emptyLines int, err error) {
 // Rule 47 Ignoring how defer arguments and receivers are evaluated
 //===============================================
 
+type DeferStruct struct {
+	id string
+}
+
 func deferTest() error {
 	i := 0
 	j := 0
+	newStruct := DeferStruct{id: "123"}
 	defer func(i int) {
-		fmt.Println(i, j) // i is evaluated when "defer" is evaluated, while j is captured as reference, and is evaluated when this function is evaluated
+		fmt.Println(i, j, &newStruct) // i is evaluated when "defer" is evaluated, while j is captured as reference, and is evaluated when this function is evaluated
 	}(i) // To avoid such behavior, we can pass i as a reference as &i
 	i++
 	j++
 
-	return nil
-}
+	newStruct = DeferStruct{id: "456"}
+	fmt.Println(i, j, &newStruct)
 
-type DeferStruct struct {
-	id string
+	return nil
 }
 
 func (d DeferStruct) print() {
@@ -249,7 +256,14 @@ func (d DeferStruct) print() {
 
 func methodDeferTest() {
 	s := DeferStruct{id: "123"}
-	defer s.print()
+	defer func() {
+		s.print() // Minho Park
+	}()
+
+	defer func() {
+		s.print() // 456
+		s.id = "Minho Park"
+	}()
 
 	s.id = "456"
 	// This will print "123" because the value of s is captured when defer is evaluated, not when the function is evaluated.
@@ -397,11 +411,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		// This is a problem since it's not checking the error type accurately.
 		switch err := err.(type) {
 		case transientError:
-			// Return 503 error
+			// Return 500 error
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		default:
 			// Return 400 error
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
 		return
 	}
